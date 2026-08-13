@@ -1,0 +1,8 @@
+alias: set_trv_target_temp_from_external_sensor
+description: ""
+sequence:
+  - action: number.set_value
+    data:
+      value: "{{ states(source_sensor) | float(0) }}"
+    target:
+      entity_id: "{{ target_sensor }}"

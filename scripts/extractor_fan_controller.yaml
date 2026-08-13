@@ -1,0 +1,94 @@
+alias: Extractor fan controller
+description: Controls an extractor fan via a linked light or direct toggle.
+icon: mdi:fan
+mode: restart
+fields:
+  action:
+    name: Action
+    description: on / off / toggle
+    required: true
+    selector:
+      select:
+        options:
+          - "on"
+          - "off"
+          - toggle
+  fan_switch:
+    name: Fan switch
+    description: Switch entity for the extractor fan
+    required: true
+    selector:
+      entity:
+        domain: switch
+  light_entity:
+    name: Linked light (optional)
+    description: When provided, off-guard checks this light before turning fan off.
+    required: false
+    selector:
+      entity:
+        domain: light
+  timeout:
+    name: Post-off delay (seconds)
+    required: false
+    default: 10
+    selector:
+      number:
+        min: 0
+        max: 3600
+        unit_of_measurement: s
+  time_restricted:
+    name: Time restricted
+    required: false
+    default: true
+    selector:
+      boolean: {}
+  time_start:
+    name: Window start HH:MM
+    required: false
+    default: "07:00"
+    selector:
+      text: {}
+  time_end:
+    name: Window end HH:MM
+    required: false
+    default: "23:30"
+    selector:
+      text: {}
+sequence:
+  - choose:
+      - alias: Toggle
+        conditions:
+          - condition: template
+            value_template: "{{ action == 'toggle' }}"
+        sequence:
+          - action: switch.toggle
+            target:
+              entity_id: "{{ fan_switch }}"
+      - alias: Turn on
+        conditions:
+          - condition: template
+            value_template: >-
+              {{ action == 'on' and (not (time_restricted | default(true) |
+              bool) or (now().strftime('%H:%M') >= (time_start |
+              default('07:00')) and now().strftime('%H:%M') < (time_end |
+              default('23:30')))) }}
+        sequence:
+          - action: switch.turn_on
+            target:
+              entity_id: "{{ fan_switch }}"
+      - alias: Turn off with delay and guard
+        conditions:
+          - condition: template
+            value_template: "{{ action == 'off' }}"
+        sequence:
+          - delay:
+              seconds: "{{ (timeout | default(10)) | int }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ (light_entity | default('')) == '' or states(light_entity)
+                  == 'off' }}
+            then:
+              - action: switch.turn_off
+                target:
+                  entity_id: "{{ fan_switch }}"
