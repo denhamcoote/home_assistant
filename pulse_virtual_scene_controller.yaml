@@ -1,0 +1,400 @@
+blueprint:
+  name: Virtual Scene Controller
+  description: |
+    # Virtual Scene Controller v1.0
+    Bespoke scene cycling + hold-to-dim blueprint for Z2M virtual switch topics.
+    Expects pre-processed payloads from a translator automation: single, double, hold, release.
+  domain: automation
+  input:
+    controller_topic:
+      name: MQTT Action Topic
+      description: "The virtual MQTT action topic from the translator (e.g., zigbee2mqtt/virtual_office_switch/action)."
+      selector:
+        text:
+    helper_last_controller_event:
+      name: Input Text Helper
+      description: "Input Text entity for state persistence. Create manually with max length >= 500."
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: input_text
+    controlled_light_entity:
+      name: Light Entity
+      description: "Light entity to toggle on/off and dim."
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: light
+    scene_1:
+      name: Scene 1
+      description: "First scene in the cycle (activated on turn-on)."
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: scene
+    scene_2:
+      name: Scene 2
+      description: "Second scene in the cycle."
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: scene
+    scene_3:
+      name: Scene 3
+      description: "Third scene in the cycle."
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: scene
+    scene_4:
+      name: Scene 4
+      description: "Fourth scene in the cycle."
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: scene
+    scene_5:
+      name: Scene 5
+      description: "Fifth scene in the cycle."
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: scene
+    action_double_press:
+      name: Double-press Action
+      description: "Action to run on double-press."
+      default: []
+      selector:
+        action:
+    hold_to_dim_enabled:
+      name: Hold-to-Dim Enabled
+      description: "Enable hold to dim the light entity."
+      default: true
+      selector:
+        boolean:
+    hold_to_dim_full_duration:
+      name: Full Dim Duration
+      description: "Seconds to sweep from full bright to fully dim (or vice-versa). Shorter = faster dimming."
+      default: 4
+      selector:
+        number:
+          min: 1
+          max: 10
+          step: 1
+          unit_of_measurement: seconds
+          mode: slider
+    hold_to_dim_direction_down:
+      name: Initial Dim Direction Down
+      description: "First hold dims down. Subsequent holds alternate direction."
+      default: true
+      selector:
+        boolean:
+    helper_multi_press_delay:
+      name: Multi-press Window
+      description: "Maximum time between taps to count as part of a scene cycle. After this, next tap is a fresh first-press (toggle)."
+      default: 3000
+      selector:
+        number:
+          min: 1000
+          max: 5000
+          step: 100
+          unit_of_measurement: ms
+          mode: slider
+    light_transition:
+      name: Light Transition Time
+      description: "Transition time for on/off toggle."
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 10
+          step: 1
+          unit_of_measurement: seconds
+          mode: slider
+
+variables:
+  helper_last_controller_event: !input helper_last_controller_event
+  helper_multi_press_delay: !input helper_multi_press_delay
+  controlled_light_entity: !input controlled_light_entity
+  light_transition: !input light_transition
+  hold_to_dim_enabled: !input hold_to_dim_enabled
+  hold_to_dim_full_duration: !input hold_to_dim_full_duration
+  hold_to_dim_direction_down: !input hold_to_dim_direction_down
+  scene_1: !input scene_1
+  scene_2: !input scene_2
+  scene_3: !input scene_3
+  scene_4: !input scene_4
+  scene_5: !input scene_5
+  default_dim_direction: "{{ 'down' if hold_to_dim_direction_down else 'up' }}"
+  scene_list: "{{ [scene_1, scene_2, scene_3, scene_4, scene_5] | reject('eq', '') | list }}"
+  num_scenes: "{{ scene_list | length }}"
+
+trigger_variables:
+  controller_topic: !input controller_topic
+
+mode: restart
+max_exceeded: silent
+
+trigger:
+  - platform: mqtt
+    topic: "{{ controller_topic }}"
+    payload: single
+  - platform: mqtt
+    topic: "{{ controller_topic }}"
+    payload: double
+  - platform: mqtt
+    topic: "{{ controller_topic }}"
+    payload: hold
+  - platform: mqtt
+    topic: "{{ controller_topic }}"
+    payload: release
+
+action:
+  - choose:
+      # Config validation
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ (helper_last_controller_event | length < 1) or state_attr(helper_last_controller_event, 'max') | int(0) < 500 }}
+        sequence:
+          - service: persistent_notification.create
+            data:
+              message: >-
+                Invalid Config: Input Text Helper is not set or max length is too short.
+                Create an input_text helper with max length set to 500 or more.
+              title: Virtual Scene Controller
+    default:
+      # Parse helper state
+      - variables:
+          trigger_action: "{{ trigger.payload }}"
+          helper_state: "{{ states(helper_last_controller_event) }}"
+          helper_valid: >-
+            {{ helper_last_controller_event is not none and
+               (helper_state | length > 0) and
+               (helper_state | regex_match('^[\{\[]')) }}
+          trigger_delta: >-
+            {% if helper_valid and helper_state.last_triggered is defined %}
+            {{ (as_timestamp(now()) - as_timestamp(helper_state.last_triggered)) * 1000 }}
+            {% else %}
+            {{ 999999 }}
+            {% endif %}
+          multipress_valid: >-
+            {{ (trigger_delta | int) <= (helper_multi_press_delay | int) }}
+          last_scene_index: >-
+            {% if helper_valid and helper_state.scene_index is defined %}
+            {{ helper_state.scene_index | int }}
+            {% else %}
+            {{ 0 }}
+            {% endif %}
+          last_dim_direction: >-
+            {% if helper_valid and helper_state.last_dim_direction is defined %}
+            {{ helper_state.last_dim_direction }}
+            {% else %}
+            {{ default_dim_direction }}
+            {% endif %}
+      # Branch on event type
+      - choose:
+          # ===============================================================
+          # SINGLE TAP
+          # ===============================================================
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger_action == 'single' }}"
+            sequence:
+              - choose:
+                  # --- Multi-press: cycle scenes ---
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ multipress_valid }}"
+                    sequence:
+                      - choose:
+                          # Scenes configured: advance cycle
+                          - conditions:
+                              - condition: template
+                                value_template: "{{ num_scenes | int > 0 }}"
+                            sequence:
+                              - variables:
+                                  next_scene_index: "{{ (last_scene_index | int % (num_scenes | int)) + 1 }}"
+                                  target_scene: "{{ scene_list[next_scene_index | int - 1] }}"
+                              - service: input_text.set_value
+                                data:
+                                  entity_id: !input helper_last_controller_event
+                                  value: >-
+                                    {{ {"scene_index": next_scene_index | int, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} | to_json }}
+                              - service: scene.turn_on
+                                target:
+                                  entity_id: "{{ target_scene }}"
+                        # No scenes configured: just turn light on
+                        default:
+                          - service: input_text.set_value
+                            data:
+                              entity_id: !input helper_last_controller_event
+                              value: >-
+                                {{ {"scene_index": 0, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} | to_json }}
+                          - service: light.turn_on
+                            target:
+                              entity_id: "{{ controlled_light_entity }}"
+                      # Wait for potential next press (mode:restart kills this on next tap)
+                      - delay:
+                          milliseconds: "{{ helper_multi_press_delay }}"
+                # --- First press: toggle ---
+                default:
+                  - choose:
+                      # Light is ON -> turn OFF
+                      - conditions:
+                          - condition: template
+                            value_template: >-
+                              {{ expand(controlled_light_entity) | selectattr('state', 'eq', 'on') | list | count > 0 }}
+                        sequence:
+                          - service: input_text.set_value
+                            data:
+                              entity_id: !input helper_last_controller_event
+                              value: >-
+                                {{ {"scene_index": 0, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} | to_json }}
+                          - service: light.turn_off
+                            target:
+                              entity_id: "{{ controlled_light_entity }}"
+                            data:
+                              transition: "{{ light_transition }}"
+                          # Wait for potential next press
+                          - delay:
+                              milliseconds: "{{ helper_multi_press_delay }}"
+                    # Light is OFF -> turn ON to Scene 1
+                    default:
+                      - variables:
+                          first_scene: "{{ scene_list[0] if num_scenes | int > 0 else '' }}"
+                      - service: input_text.set_value
+                        data:
+                          entity_id: !input helper_last_controller_event
+                          value: >-
+                            {{ {"scene_index": 1, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} | to_json }}
+                      - choose:
+                          - conditions:
+                              - condition: template
+                                value_template: "{{ first_scene | length > 0 }}"
+                            sequence:
+                              - service: scene.turn_on
+                                target:
+                                  entity_id: "{{ first_scene }}"
+                        default:
+                          - service: light.turn_on
+                            target:
+                              entity_id: "{{ controlled_light_entity }}"
+                      # Wait for potential next press
+                      - delay:
+                          milliseconds: "{{ helper_multi_press_delay }}"
+          # ===============================================================
+          # DOUBLE TAP
+          # ===============================================================
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger_action == 'double' }}"
+            sequence:
+              - choose:
+                  - conditions: []
+                    sequence: !input action_double_press
+          # ===============================================================
+          # HOLD - Start transition-based dim
+          # ===============================================================
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger_action == 'hold' }}"
+            sequence:
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: >-
+                          {{ hold_to_dim_enabled and (controlled_light_entity | length > 0) }}
+                    sequence:
+                      - variables:
+                          current_brightness: >-
+                            {{ state_attr(controlled_light_entity, 'brightness') | int(0) }}
+                          toggled_direction: >-
+                            {{ 'up' if last_dim_direction == 'down' else 'down' }}
+                          dim_direction: >-
+                            {% if current_brightness <= 5 %}
+                            up
+                            {% elif current_brightness >= 250 %}
+                            down
+                            {% else %}
+                            {{ toggled_direction }}
+                            {% endif %}
+                          target_brightness: >-
+                            {{ 254 if dim_direction == 'up' else 1 }}
+                          brightness_distance: >-
+                            {{ (target_brightness | int - current_brightness | int) | abs }}
+                          dim_transition: >-
+                            {{ (brightness_distance | float / 254 * hold_to_dim_full_duration | float) | round(1) }}
+                      # Single command: the light transitions smoothly on its own
+                      - service: light.turn_on
+                        target:
+                          entity_id: "{{ controlled_light_entity }}"
+                        data:
+                          brightness: "{{ target_brightness }}"
+                          transition: "{{ dim_transition }}"
+                      # Store direction + dim parameters for release calculation
+                      - service: input_text.set_value
+                        data:
+                          entity_id: !input helper_last_controller_event
+                          value: >-
+                            {{ {"scene_index": last_scene_index | int, "last_triggered": now() | string, "last_dim_direction": dim_direction, "dim_start_brightness": current_brightness | int, "dim_target_brightness": target_brightness | int, "dim_transition": dim_transition | float, "dim_start_time": now() | string} | to_json }}
+                      # Keep automation alive so mode:restart can kill it on release
+                      - delay: "{{ hold_to_dim_full_duration | int + 2 }}"
+          # ===============================================================
+          # RELEASE - Freeze light at current brightness
+          # ===============================================================
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger_action == 'release' }}"
+            sequence:
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: >-
+                          {{ hold_to_dim_enabled and (controlled_light_entity | length > 0) }}
+                    sequence:
+                      # Calculate where brightness SHOULD be based on elapsed time
+                      - variables:
+                          dim_start_brightness: >-
+                            {% if helper_valid and helper_state.dim_start_brightness is defined %}
+                            {{ helper_state.dim_start_brightness | int }}
+                            {% else %}
+                            {{ 128 }}
+                            {% endif %}
+                          dim_target_brightness: >-
+                            {% if helper_valid and helper_state.dim_target_brightness is defined %}
+                            {{ helper_state.dim_target_brightness | int }}
+                            {% else %}
+                            {{ 1 }}
+                            {% endif %}
+                          dim_transition_secs: >-
+                            {% if helper_valid and helper_state.dim_transition is defined %}
+                            {{ helper_state.dim_transition | float }}
+                            {% else %}
+                            {{ 4.0 }}
+                            {% endif %}
+                          dim_start_time: >-
+                            {% if helper_valid and helper_state.dim_start_time is defined %}
+                            {{ helper_state.dim_start_time }}
+                            {% else %}
+                            {{ now() | string }}
+                            {% endif %}
+                          elapsed: >-
+                            {{ (as_timestamp(now()) - as_timestamp(dim_start_time)) }}
+                          progress: >-
+                            {{ [elapsed | float / dim_transition_secs | float, 1.0] | min }}
+                          freeze_brightness: >-
+                            {{ (dim_start_brightness | int + ((dim_target_brightness | int - dim_start_brightness | int) * progress | float)) | round(0) | int }}
+                      - service: light.turn_on
+                        target:
+                          entity_id: "{{ controlled_light_entity }}"
+                        data:
+                          brightness: "{{ freeze_brightness }}"
+                          transition: 0
