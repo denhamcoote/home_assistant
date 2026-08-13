@@ -1,0 +1,186 @@
+blueprint:
+  name: "Sonoff Orb-ZBW1 Pulse/Edge Translator"
+  description: >-
+    Mode-aware translator. Reads the device's external_trigger_mode select entity
+    to determine pulse vs edge behaviour. In pulse mode (single-edge), detects
+    single/double only. In edge mode (double-edge), detects single/double/hold/release.
+  domain: automation
+  input:
+    source_topic:
+      name: Source MQTT Topic
+      description: "The full raw MQTT action topic (e.g., zigbee2mqtt/053 [Ofiice] - Wired 1-gang switch (zigbee)/action)."
+      default: ""
+    target_topic:
+      name: Target Virtual MQTT Topic
+      description: "The virtual topic for processed events (e.g., zigbee2mqtt/virtual_office_switch/action)."
+      default: ""
+    trigger_mode_entity:
+      name: External Trigger Mode Entity
+      description: "The select entity that reflects the device's current trigger mode (edge or pulse)."
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: select
+    hold_timeout:
+      name: Hold Threshold Time
+      description: "How long you must hold the button down to trigger a hold event (edge mode only)."
+      default: 0.400
+      selector:
+        number:
+          min: 0.150
+          max: 1.000
+          step: 0.050
+          unit_of_measurement: seconds
+          mode: slider
+    double_timeout:
+      name: Double-Click Window
+      description: "The maximum allowed pause between clicks to register a double."
+      default: 0.250
+      selector:
+        number:
+          min: 0.100
+          max: 0.600
+          step: 0.050
+          unit_of_measurement: seconds
+          mode: slider
+
+variables:
+  source_topic_var: !input source_topic
+  target_topic_var: !input target_topic
+  trigger_mode_entity_var: !input trigger_mode_entity
+  hold_timeout_var: !input hold_timeout
+  double_timeout_var: !input double_timeout
+
+mode: single
+max: 10
+max_exceeded: silent
+
+trigger:
+  - platform: mqtt
+    topic: !input source_topic
+    payload: toggle
+
+action:
+  - variables:
+      current_mode: "{{ states(trigger_mode_entity_var) }}"
+
+  - choose:
+      # =================================================================
+      # PULSE MODE: single-edge (one toggle per press-release)
+      # =================================================================
+      - conditions:
+          - condition: template
+            value_template: "{{ current_mode == 'pulse' }}"
+        sequence:
+          # Each toggle is a complete press-release. Check for double.
+          - wait_for_trigger:
+              - platform: mqtt
+                topic: !input source_topic
+                payload: toggle
+            timeout: "{{ double_timeout_var }}"
+            continue_on_timeout: true
+
+          - choose:
+              # No second click -> single
+              - conditions:
+                  - condition: template
+                    value_template: "{{ wait.trigger is none }}"
+                sequence:
+                  - action: mqtt.publish
+                    data:
+                      topic: "{{ target_topic_var }}"
+                      payload: single
+
+              # Second click arrived -> double
+              - conditions:
+                  - condition: template
+                    value_template: "{{ wait.trigger is not none }}"
+                sequence:
+                  - action: mqtt.publish
+                    data:
+                      topic: "{{ target_topic_var }}"
+                      payload: double
+
+          - delay: "00:00:00.100"
+
+      # =================================================================
+      # EDGE MODE: double-edge (two toggles per press-release)
+      # =================================================================
+      - conditions:
+          - condition: template
+            value_template: "{{ current_mode == 'edge' }}"
+        sequence:
+          # STEP 1: Wait for release toggle or hold timeout
+          - wait_for_trigger:
+              - platform: mqtt
+                topic: !input source_topic
+                payload: toggle
+            timeout: "{{ hold_timeout_var }}"
+            continue_on_timeout: true
+
+          - choose:
+              # PATH A: TIMEOUT -> Hold detected
+              - conditions:
+                  - condition: template
+                    value_template: "{{ wait.trigger is none }}"
+                sequence:
+                  - action: mqtt.publish
+                    data:
+                      topic: "{{ target_topic_var }}"
+                      payload: hold
+
+                  # Wait for physical spring-up release
+                  - wait_for_trigger:
+                      - platform: mqtt
+                        topic: !input source_topic
+                        payload: toggle
+
+                  - action: mqtt.publish
+                    data:
+                      topic: "{{ target_topic_var }}"
+                      payload: release
+
+              # PATH B: Released -> Single/Double candidate
+              - conditions:
+                  - condition: template
+                    value_template: "{{ wait.trigger is not none }}"
+                sequence:
+                  # Wait for second click
+                  - wait_for_trigger:
+                      - platform: mqtt
+                        topic: !input source_topic
+                        payload: toggle
+                    timeout: "{{ double_timeout_var }}"
+                    continue_on_timeout: true
+
+                  - choose:
+                      # No second click -> single
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ wait.trigger is none }}"
+                        sequence:
+                          - action: mqtt.publish
+                            data:
+                              topic: "{{ target_topic_var }}"
+                              payload: single
+
+                      # Second click -> double
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ wait.trigger is not none }}"
+                        sequence:
+                          # Wait for release of second click
+                          - wait_for_trigger:
+                              - platform: mqtt
+                                topic: !input source_topic
+                                payload: toggle
+                            timeout: "{{ hold_timeout_var }}"
+                            continue_on_timeout: true
+
+                          - action: mqtt.publish
+                            data:
+                              topic: "{{ target_topic_var }}"
+                              payload: double
+
+          - delay: "00:00:00.100"
