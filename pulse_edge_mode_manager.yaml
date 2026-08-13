@@ -1,0 +1,77 @@
+blueprint:
+  name: "Edge Mode Manager"
+  description: >-
+    Owns the full mode lifecycle for the external trigger mode select entity.
+    On double-press: activates edge mode. While in edge mode: resets an idle
+    timer on each release event. On timeout: reverts to pulse mode.
+  domain: automation
+  input:
+    trigger_mode_entity:
+      name: External Trigger Mode Entity
+      description: "The select entity for the device's trigger mode."
+      default: ""
+      selector:
+        entity:
+          filter:
+            domain: select
+    virtual_action_topic:
+      name: Virtual Action MQTT Topic
+      description: "The virtual topic where the translator publishes processed events."
+      default: ""
+      selector:
+        text:
+    revert_timeout:
+      name: Revert Timeout
+      description: "Seconds of inactivity after which edge mode reverts to pulse."
+      default: 30
+      selector:
+        number:
+          min: 10
+          max: 120
+          step: 5
+          unit_of_measurement: seconds
+          mode: slider
+
+variables:
+  trigger_mode_entity_var: !input trigger_mode_entity
+
+mode: restart
+max_exceeded: silent
+
+trigger:
+  # Double-press activates edge mode (or resets timer if already in edge)
+  - platform: mqtt
+    topic: !input virtual_action_topic
+    payload: double
+    id: double_press
+  # Release events reset the revert timer while in edge mode
+  - platform: mqtt
+    topic: !input virtual_action_topic
+    payload: release
+    id: release_event
+
+action:
+  # If double-press and currently in pulse, switch to edge
+  - if:
+      - condition: trigger
+        id: double_press
+      - condition: template
+        value_template: "{{ states(trigger_mode_entity_var) == 'pulse' }}"
+    then:
+      - service: select.select_option
+        target:
+          entity_id: !input trigger_mode_entity
+        data:
+          option: "edge"
+
+  # Gate: only run the revert timer if now in edge mode
+  - condition: template
+    value_template: "{{ states(trigger_mode_entity_var) == 'edge' }}"
+
+  # Wait then revert (mode:restart resets this on every new trigger)
+  - delay: !input revert_timeout
+  - service: select.select_option
+    target:
+      entity_id: !input trigger_mode_entity
+    data:
+      option: "pulse"
