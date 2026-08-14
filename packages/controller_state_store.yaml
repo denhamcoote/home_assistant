@@ -1,0 +1,22 @@
+# Shared state store for the scene-controller blueprints.
+# Include via a package, or copy the `template:` block into configuration.yaml.
+# One sensor serves every controller instance; each instance writes under its own State Key.
+template:
+  - triggers:
+      - trigger: event
+        event_type: controller_state_store
+    sensor:
+      - name: Controller State Store
+        unique_id: controller_state_store
+        state: "{{ now().isoformat() }}"
+        attributes:
+          # Merge the incoming payload into the keyed store; `this` holds the pre-update attributes.
+          data: >-
+            {{ (this.attributes.get('data', {}) if this.attributes is defined else {})
+               | combine({ trigger.event.data.key: trigger.event.data.payload }) }}
+
+# Optional: keep this out of the recorder to avoid DB growth from frequent updates.
+# recorder:
+#   exclude:
+#     entities:
+#       - sensor.controller_state_store

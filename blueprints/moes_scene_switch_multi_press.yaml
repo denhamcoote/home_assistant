@@ -2,7 +2,27 @@
 blueprint:
   name: Moes / Tuya Scene Switch (Multi-press)
   description: |
-    # Moes / Tuya Scene Switch - Multi-press Controller v0.123
+    # Moes / Tuya Scene Switch - Multi-press Controller v0.124
+
+    ## State storage
+    State is persisted in a shared trigger-based template sensor (default:
+    sensor.controller_state_store), keyed by "State Key". Add this once to
+    configuration.yaml (shared by every controller instance):
+
+        template:
+          - triggers:
+              - trigger: event
+                event_type: controller_state_store
+            sensor:
+              - name: Controller State Store
+                unique_id: controller_state_store
+                state: "{{ now().isoformat() }}"
+                attributes:
+                  data: >-
+                    {{ (this.attributes.get('data', {}) if this.attributes is defined else {})
+                       | combine({ trigger.event.data.key: trigger.event.data.payload }) }}
+
+    Then set a unique "State Key" per switch.
   domain: automation
   input:
     controller_device:
@@ -100,14 +120,20 @@ blueprint:
           <<: &num-selector-slider
             mode: slider
             step: 1
-    helper_last_controller_event:
-      name: (Required) Helper - Input Text
-      description: Input Text used to store the last event fired by the controller. You will need to manually create a text input entity for this, please read the blueprint Additional Notes for more info.
-      default: ""
+    state_sensor:
+      name: (Required) State Store Sensor
+      description: Trigger-based template sensor that persists the last controller event. See Additional Notes to create the shared 'Controller State Store' sensor in configuration.yaml.
+      default: sensor.controller_state_store
       selector:
         entity:
           filter:
-            domain: input_text
+            domain: sensor
+    state_key:
+      name: (Required) State Key
+      description: Unique key for this switch within the shared store (e.g. hall_switch). Must be unique per switch/automation.
+      default: ""
+      selector:
+        text:
     controlled_light_entity:
       name: (Optional) Toggle/Dim Light Entity
       description: Light entity to be toggled on first press as configured below.
@@ -265,7 +291,8 @@ variables:
   # convert input tags to variables, to be used in templates
   button_multi_press_enabled: !input button_multi_press_enabled
   button_multi_press_always_fire_first_release: !input button_multi_press_always_fire_first_release
-  helper_last_controller_event: !input helper_last_controller_event
+  state_sensor: !input state_sensor
+  state_key: !input state_key
   helper_multi_press_delay: !input helper_multi_press_delay
   button_toggle_controlled_light_entity_first_press: !input button_toggle_controlled_light_entity_first_press
   toggle_controlled_light_entity_brightness: !input toggle_controlled_light_entity_brightness
@@ -383,13 +410,13 @@ action:
       - conditions:
           - condition: template
             value_template: >-
-              {{ (helper_last_controller_event | length < 1) or state_attr(helper_last_controller_event, 'max') < 500 }}
+              {{ (state_sensor | length < 1) or (state_key | length < 1) }}
         sequence:
           - service: persistent_notification.create
             data:
               message: >-
-                Invalid Config: "Helper - Last Controller Event" is not set or too short.
-                Set max length to 500 or more.
+                Invalid Config: "State Store Sensor" or "State Key" is not set.
+                Create the shared 'Controller State Store' template sensor (see Additional Notes) and set a unique State Key.
               title: Moes Scene Switch
       - conditions:
           - condition: template
@@ -418,10 +445,10 @@ action:
             {% else %}
             {{ trigger.event.data.command }}
             {% endif %}
-          helper_valid: '{{ helper_last_controller_event is not none and (states(helper_last_controller_event)|length) and (states(helper_last_controller_event) | regex_match("^[{\[]{1}([,:{}\[\]0-9.\-+Eaeflnr-u \n\r\t]|\".*?\")+[}\]]{1}$")) }}'
-          helper_state: "{{ states(helper_last_controller_event) }}"
+          helper_state: "{{ (state_attr(state_sensor, 'data') or {}).get(state_key) }}"
+          helper_valid: "{{ helper_state is mapping }}"
           trigger_delta: >-
-            {% if helper_valid %}
+            {% if helper_valid and helper_state.last_triggered is defined %}
             {% set trig_time = helper_state.last_triggered %}
             {% else %}
             {% set trig_time = "1970-01-01 00:00:00" %}
@@ -486,10 +513,10 @@ action:
                     sequence:
                       # update helper
                       - &inputtext-update
-                        service: input_text.set_value
-                        data:
-                          entity_id: !input helper_last_controller_event
-                          value: '{{ {"press_type":press_type,"last_triggered":now() | string} | to_json }}'
+                        event: controller_state_store
+                        event_data:
+                          key: "{{ state_key }}"
+                          payload: '{{ {"press_type":press_type,"last_triggered":now() | string} }}'
                       - choose:
                           # if multi press events are enabled
                           - conditions:
@@ -532,10 +559,10 @@ action:
                                         value_template: >-
                                           {{ not button_multi_press_enabled or not multipress_valid }}
                                     sequence:
-                                      - service: input_text.set_value
-                                        data:
-                                          entity_id: !input helper_last_controller_event
-                                          value: ""
+                                      - event: controller_state_store
+                                        event_data:
+                                          key: "{{ state_key }}"
+                                          payload: "{{ None }}"
                                       - service: light.turn_off
                                         target:
                                           entity_id: "{{ controlled_light_entity }}"

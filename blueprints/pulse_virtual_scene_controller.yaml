@@ -1,9 +1,30 @@
 blueprint:
   name: Virtual Scene Controller
   description: |
-    # Virtual Scene Controller v1.0
+    # Virtual Scene Controller v2.0
     Bespoke scene cycling + hold-to-dim blueprint for Z2M virtual switch topics.
     Expects pre-processed payloads from a translator automation: single, double, hold, release.
+
+    ## State storage
+    State is persisted in a shared trigger-based template sensor (default:
+    sensor.controller_state_store), keyed by "State Key". Add this once to
+    configuration.yaml (shared by every controller instance):
+
+        template:
+          - triggers:
+              - trigger: event
+                event_type: controller_state_store
+            sensor:
+              - name: Controller State Store
+                unique_id: controller_state_store
+                state: "{{ now().isoformat() }}"
+                attributes:
+                  data: >-
+                    {{ (this.attributes.get('data', {}) if this.attributes is defined else {})
+                       | combine({ trigger.event.data.key: trigger.event.data.payload }) }}
+
+    Then set a unique "State Key" per switch. Optionally exclude
+    sensor.controller_state_store from the recorder to avoid database growth.
   domain: automation
   input:
     controller_topic:
@@ -11,14 +32,20 @@ blueprint:
       description: "The virtual MQTT action topic from the translator (e.g., zigbee2mqtt/virtual_office_switch/action)."
       selector:
         text:
-    helper_last_controller_event:
-      name: Input Text Helper
-      description: "Input Text entity for state persistence. Create manually with max length >= 500."
-      default: ""
+    state_sensor:
+      name: State Store Sensor
+      description: "Trigger-based template sensor that persists controller state. See Additional Notes to create the shared 'Controller State Store' sensor in configuration.yaml."
+      default: sensor.controller_state_store
       selector:
         entity:
           filter:
-            domain: input_text
+            domain: sensor
+    state_key:
+      name: State Key
+      description: "Unique key for this controller instance within the shared store (e.g. office_switch). Must be unique per switch."
+      default: ""
+      selector:
+        text:
     controlled_light_entity:
       name: Light Entity
       description: "Light entity to toggle on/off and dim."
@@ -120,7 +147,8 @@ blueprint:
           mode: slider
 
 variables:
-  helper_last_controller_event: !input helper_last_controller_event
+  state_sensor: !input state_sensor
+  state_key: !input state_key
   helper_multi_press_delay: !input helper_multi_press_delay
   controlled_light_entity: !input controlled_light_entity
   light_transition: !input light_transition
@@ -162,23 +190,20 @@ action:
       - conditions:
           - condition: template
             value_template: >-
-              {{ (helper_last_controller_event | length < 1) or state_attr(helper_last_controller_event, 'max') | int(0) < 500 }}
+              {{ (state_sensor | length < 1) or (state_key | length < 1) }}
         sequence:
           - service: persistent_notification.create
             data:
               message: >-
-                Invalid Config: Input Text Helper is not set or max length is too short.
-                Create an input_text helper with max length set to 500 or more.
+                Invalid Config: State Store Sensor or State Key is not set.
+                Create the shared 'Controller State Store' template sensor (see Additional Notes) and set a unique State Key.
               title: Virtual Scene Controller
     default:
       # Parse helper state
       - variables:
           trigger_action: "{{ trigger.payload }}"
-          helper_state: "{{ states(helper_last_controller_event) }}"
-          helper_valid: >-
-            {{ helper_last_controller_event is not none and
-               (helper_state | length > 0) and
-               (helper_state | regex_match('^[\{\[]')) }}
+          helper_state: "{{ (state_attr(state_sensor, 'data') or {}).get(state_key) }}"
+          helper_valid: "{{ helper_state is mapping }}"
           trigger_delta: >-
             {% if helper_valid and helper_state.last_triggered is defined %}
             {{ (as_timestamp(now()) - as_timestamp(helper_state.last_triggered)) * 1000 }}
@@ -223,21 +248,21 @@ action:
                               - variables:
                                   next_scene_index: "{{ (last_scene_index | int % (num_scenes | int)) + 1 }}"
                                   target_scene: "{{ scene_list[next_scene_index | int - 1] }}"
-                              - service: input_text.set_value
-                                data:
-                                  entity_id: !input helper_last_controller_event
-                                  value: >-
-                                    {{ {"scene_index": next_scene_index | int, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} | to_json }}
+                              - event: controller_state_store
+                                event_data:
+                                  key: "{{ state_key }}"
+                                  payload: >-
+                                    {{ {"scene_index": next_scene_index | int, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} }}
                               - service: scene.turn_on
                                 target:
                                   entity_id: "{{ target_scene }}"
                         # No scenes configured: just turn light on
                         default:
-                          - service: input_text.set_value
-                            data:
-                              entity_id: !input helper_last_controller_event
-                              value: >-
-                                {{ {"scene_index": 0, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} | to_json }}
+                          - event: controller_state_store
+                            event_data:
+                              key: "{{ state_key }}"
+                              payload: >-
+                                {{ {"scene_index": 0, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} }}
                           - service: light.turn_on
                             target:
                               entity_id: "{{ controlled_light_entity }}"
@@ -253,11 +278,11 @@ action:
                             value_template: >-
                               {{ expand(controlled_light_entity) | selectattr('state', 'eq', 'on') | list | count > 0 }}
                         sequence:
-                          - service: input_text.set_value
-                            data:
-                              entity_id: !input helper_last_controller_event
-                              value: >-
-                                {{ {"scene_index": 0, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} | to_json }}
+                          - event: controller_state_store
+                            event_data:
+                              key: "{{ state_key }}"
+                              payload: >-
+                                {{ {"scene_index": 0, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} }}
                           - service: light.turn_off
                             target:
                               entity_id: "{{ controlled_light_entity }}"
@@ -270,11 +295,11 @@ action:
                     default:
                       - variables:
                           first_scene: "{{ scene_list[0] if num_scenes | int > 0 else '' }}"
-                      - service: input_text.set_value
-                        data:
-                          entity_id: !input helper_last_controller_event
-                          value: >-
-                            {{ {"scene_index": 1, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} | to_json }}
+                      - event: controller_state_store
+                        event_data:
+                          key: "{{ state_key }}"
+                          payload: >-
+                            {{ {"scene_index": 1, "last_triggered": now() | string, "last_dim_direction": last_dim_direction} }}
                       - choose:
                           - conditions:
                               - condition: template
@@ -340,11 +365,11 @@ action:
                           brightness: "{{ target_brightness }}"
                           transition: "{{ dim_transition }}"
                       # Store direction + dim parameters for release calculation
-                      - service: input_text.set_value
-                        data:
-                          entity_id: !input helper_last_controller_event
-                          value: >-
-                            {{ {"scene_index": last_scene_index | int, "last_triggered": now() | string, "last_dim_direction": dim_direction, "dim_start_brightness": current_brightness | int, "dim_target_brightness": target_brightness | int, "dim_transition": dim_transition | float, "dim_start_time": now() | string} | to_json }}
+                      - event: controller_state_store
+                        event_data:
+                          key: "{{ state_key }}"
+                          payload: >-
+                            {{ {"scene_index": last_scene_index | int, "last_triggered": now() | string, "last_dim_direction": dim_direction, "dim_start_brightness": current_brightness | int, "dim_target_brightness": target_brightness | int, "dim_transition": dim_transition | float, "dim_start_time": now() | string} }}
                       # Keep automation alive so mode:restart can kill it on release
                       - delay: "{{ hold_to_dim_full_duration | int + 2 }}"
           # ===============================================================
