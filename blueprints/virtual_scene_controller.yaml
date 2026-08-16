@@ -11,7 +11,7 @@ blueprint:
     configuration.yaml (shared by every controller instance):
 
         template:
-          - triggers:
+          - trigger:
               - trigger: event
                 event_type: controller_state_store
             sensor:

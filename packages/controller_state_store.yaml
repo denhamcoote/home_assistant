@@ -2,7 +2,7 @@
 # Include via a package, or copy the `template:` block into configuration.yaml.
 # One sensor serves every controller instance; each instance writes under its own State Key.
 template:
-  - triggers:
+  - trigger:
       - trigger: event
         event_type: controller_state_store
     sensor:
